@@ -1,357 +1,279 @@
-using System.Collections;
-using TMPro;
 using UnityEngine;
-using UnityEngine.SceneManagement;
-using UnityEngine.Serialization;
+using System.Collections; // Necesario para Coroutines (IEnumerator)
+using UnityEngine.SceneManagement; // Necesario para LoadScene
+using UnityEngine.UI; // Necesario para Text (si usas UI Legacy)
+// using TMPro; // Descomenta esta línea y cambia 'Text' por 'TMP_Text' si usas TextMeshPro
 
-namespace Tanks.Complete
+// Adaptado para Unity 6
+public class GameManager : MonoBehaviour
 {
-    public class GameManager : MonoBehaviour
+    public int m_NumRoundsToWin = 5;
+    public float m_StartDelay = 3f;
+    public float m_EndDelay = 3f;
+    public CameraControl m_CameraControl; // Script que controla la cámara
+    public Text m_MessageText; // Objeto Text de UI para mostrar mensajes
+    // public TMP_Text m_MessageText; // Descomenta esta si usas TextMeshPro
+    public GameObject m_TankPrefab; // El prefab del tanque que se va a instanciar
+    public TankManager[] m_Tanks; // Array configurable en el Inspector con los datos de cada jugador
+
+    private int m_RoundNumber;
+    private WaitForSeconds m_StartWait; // Delay precalculado para inicio de ronda
+    private WaitForSeconds m_EndWait; // Delay precalculado para fin de ronda
+    private TankManager m_RoundWinner; // Quién ganó la ronda actual
+    private TankManager m_GameWinner; // Quién ganó el juego completo
+
+    private void Start()
     {
-        // Which state the game is currently in
-        public enum GameState
+        m_StartWait = new WaitForSeconds(m_StartDelay);
+        m_EndWait = new WaitForSeconds(m_EndDelay);
+
+        // --- Comprobaciones de Errores Comunes ---
+        if (m_CameraControl == null) Debug.LogError("GameManager: Falta asignar 'Camera Control' en el Inspector.");
+        if (m_MessageText == null) Debug.LogError("GameManager: Falta asignar 'Message Text' en el Inspector.");
+        if (m_TankPrefab == null) Debug.LogError("GameManager: Falta asignar 'Tank Prefab' en el Inspector.");
+        if (m_Tanks == null || m_Tanks.Length < 1) // Permitimos 1 jugador para pruebas, aunque el PDF es para 2
         {
-            MainMenu,
-            Game
+            Debug.LogError("GameManager: El array 'Tanks' debe tener al menos 1 elemento configurado en el Inspector.");
+            this.enabled = false; // Desactiva el GameManager si no hay tanques configurados
+            return;
         }
-
-        // Data about the selected tanks passed from the menu to the GameManager
-        public class PlayerData
+        bool spawnPointsOk = true;
+        for (int i = 0; i < m_Tanks.Length; i++)
         {
-            public bool IsComputer;
-            public Color TankColor;
-            public GameObject UsedPrefab;
-            public int ControlIndex;
-        }
-        
-        public int m_NumRoundsToWin = 5;            // The number of rounds a single player has to win to win the game.
-        public float m_StartDelay = 3f;             // The delay between the start of RoundStarting and RoundPlaying phases.
-        public float m_EndDelay = 3f;               // The delay between the end of RoundPlaying and RoundEnding phases.
-        public CameraControl m_CameraControl;       // Reference to the CameraControl script for control during different phases.
-
-        [Header("Tanks Prefabs")]
-        public GameObject m_Tank1Prefab;            // The Prefab used by the tank in Slot 1 of the Menu
-        public GameObject m_Tank2Prefab;            // The Prefab used by the tank in Slot 2 of the Menu
-        public GameObject m_Tank3Prefab;            // The Prefab used by the tank in Slot 3 of the Menu
-        public GameObject m_Tank4Prefab;            // The Prefab used by the tank in Slot 4 of the Menu
-        
-        [FormerlySerializedAs("m_Tanks")] 
-        public TankManager[] m_SpawnPoints;         // A collection of managers for enabling and disabling different aspects of the tanks.
-        
-        private GameState m_CurrentState;
-        
-        private int m_RoundNumber;                  // Which round the game is currently on.
-        private WaitForSeconds m_StartWait;         // Used to have a delay whilst the round starts.
-        private WaitForSeconds m_EndWait;           // Used to have a delay whilst the round or game ends.
-        private TankManager m_RoundWinner;          // Reference to the winner of the current round.  Used to make an announcement of who won.
-        private TankManager m_GameWinner;           // Reference to the winner of the game.  Used to make an announcement of who won.
-
-        private PlayerData[] m_TankData;            // Data passed from the menu about each selected tank (at least 2, max 4)
-        private int m_PlayerCount = 0;              // The number of players (2 to 4), decided from the number of PlayerData passed by the menu
-        private TextMeshProUGUI m_TitleText;        // The text used to display game message. Automatically found as part of the Menu prefab
-
-        private void Start()
-        {
-            m_CurrentState = GameState.MainMenu;
-
-            // Find the text used to display game info. Need to look at inactive object too, as the Menu prefab (which contains it) may be
-            // disabled at the start when the user have a Title Screen which will enable the Menu.
-            var textRef = FindAnyObjectByType<MessageTextReference>(FindObjectsInactive.Include);
-
-            // If that text couldn't be found, we display an error and exit as it is required for the game manager to work
-            if (textRef == null)
+            if (m_Tanks[i].m_SpawnPoint == null)
             {
-                Debug.LogError("You need to add the Menus prefab in the scene to use the GameManager!");
-                return;
+                Debug.LogError($"GameManager: Falta asignar 'Spawn Point' para el Tanque {i + 1} en el array 'Tanks'.");
+                spawnPointsOk = false;
             }
+        }
+        if (!spawnPointsOk)
+        {
+            this.enabled = false; // Desactiva si faltan SpawnPoints
+            return;
+        }
+        // --- Fin Comprobaciones ---
 
-            m_TitleText = textRef.Text;
-            m_TitleText.text = "";
+        SpawnAllTanks();
+        SetCameraTargets();
 
-            // The GameManager require 4 tanks prefabs, as the start menu have 4 fixed slot and need the 4 tanks to show there
-            if (m_Tank1Prefab == null || m_Tank2Prefab == null || m_Tank3Prefab == null || m_Tank4Prefab == null)
+        // Inicia el bucle principal del juego
+        StartCoroutine(GameLoop());
+    }
+
+    private void SpawnAllTanks()
+    {
+        for (int i = 0; i < m_Tanks.Length; i++)
+        {
+            // No instanciar si el prefab no está asignado
+            if (m_TankPrefab == null) continue;
+
+            // Instancia el tanque y guarda la referencia en el TankManager correspondiente
+            m_Tanks[i].m_Instance = Instantiate(m_TankPrefab, m_Tanks[i].m_SpawnPoint.position, m_Tanks[i].m_SpawnPoint.rotation) as GameObject;
+            m_Tanks[i].m_PlayerNumber = i + 1; // Asigna número de jugador (1, 2, ...)
+            m_Tanks[i].Setup(); // Llama a Setup para configurar colores, controles, etc.
+        }
+    }
+
+    private void SetCameraTargets()
+    {
+        if (m_CameraControl == null) return; // Salir si no hay CameraControl
+
+        // Cuenta cuántos tanques se instanciaron correctamente
+        int validTankCount = 0;
+        for (int i = 0; i < m_Tanks.Length; i++)
+        {
+            if (m_Tanks[i] != null && m_Tanks[i].m_Instance != null)
             {
-                Debug.LogError("You need to assign 4 tank prefab in the GameManager!");
+                validTankCount++;
             }
         }
 
-        void GameStart()
+        // Crea el array de Transforms con el tamaño exacto de tanques válidos
+        Transform[] targets = new Transform[validTankCount];
+        int currentTargetIndex = 0;
+        for (int i = 0; i < m_Tanks.Length; i++)
         {
-            // Create the delays so they only have to be made once.
-            m_StartWait = new WaitForSeconds (m_StartDelay);
-            m_EndWait = new WaitForSeconds (m_EndDelay);
-
-            SpawnAllTanks();
-            SetCameraTargets();
-
-            // Once the tanks have been created and the camera is using them as targets, start the game.
-            StartCoroutine (GameLoop ());
-        }
-
-        void ChangeGameState(GameState newState)
-        {
-            m_CurrentState = newState;
-
-            switch (m_CurrentState)
+            if (m_Tanks[i] != null && m_Tanks[i].m_Instance != null)
             {
-                case GameState.Game:
-                    GameStart();
-                    break;
+                targets[currentTargetIndex] = m_Tanks[i].m_Instance.transform;
+                currentTargetIndex++;
             }
         }
 
-        // Called by the menu, passing along the data from the selection made by the player in the menu
-        public void StartGame(PlayerData[] playerData)
+        // Asigna los objetivos a la cámara
+        m_CameraControl.m_Targets = targets;
+    }
+
+    // Corutina principal que cicla a través de las fases de la ronda
+    private IEnumerator GameLoop()
+    {
+        yield return StartCoroutine(RoundStarting());
+        yield return StartCoroutine(RoundPlaying());
+        yield return StartCoroutine(RoundEnding());
+
+        // Si se determinó un ganador del juego en RoundEnding
+        if (m_GameWinner != null)
         {
-            m_TankData = playerData;
-            m_PlayerCount = m_TankData.Length;
-            ChangeGameState(GameState.Game);
+            // Reinicia la escena actual
+            SceneManager.LoadScene(SceneManager.GetActiveScene().buildIndex);
+        }
+        else // Si no hay ganador del juego, empieza la siguiente ronda
+        {
+            StartCoroutine(GameLoop());
+        }
+    }
+
+    // Corutina para la fase de inicio de ronda
+    private IEnumerator RoundStarting()
+    {
+        ResetAllTanks(); // Coloca los tanques en sus SpawnPoints
+        DisableTankControl(); // Impide que se muevan
+
+        // Ajusta la cámara instantáneamente a la nueva posición/zoom
+        if (m_CameraControl != null) m_CameraControl.SetStartPositionAndSize();
+
+        m_RoundNumber++;
+        if (m_MessageText != null) m_MessageText.text = "ROUND " + m_RoundNumber;
+
+        // Espera el delay inicial antes de empezar a jugar
+        yield return m_StartWait;
+    }
+
+    // Corutina para la fase de juego activo
+    private IEnumerator RoundPlaying()
+    {
+        EnableTankControl(); // Permite mover los tanques
+
+        if (m_MessageText != null) m_MessageText.text = string.Empty; // Borra el mensaje
+
+        // Bucle que se ejecuta cada frame mientras quede más de un tanque
+        while (!OneTankLeft())
+        {
+            yield return null; // Espera al siguiente frame
+        }
+    }
+
+    // Corutina para la fase de fin de ronda
+    private IEnumerator RoundEnding()
+    {
+        DisableTankControl(); // Impide mover los tanques
+
+        m_RoundWinner = null; // Resetea el ganador de la ronda anterior
+        m_RoundWinner = GetRoundWinner(); // Determina el ganador de esta ronda
+
+        if (m_RoundWinner != null)
+        {
+            m_RoundWinner.m_Wins++; // Incrementa las victorias del ganador
         }
 
+        m_GameWinner = GetGameWinner(); // Comprueba si alguien ganó el juego
 
-        private void SpawnAllTanks()
+        // Genera y muestra el mensaje final
+        string message = EndMessage();
+        if (m_MessageText != null) m_MessageText.text = message;
+
+        // Espera el delay final antes de pasar a la siguiente ronda o reiniciar
+        yield return m_EndWait;
+    }
+
+    // Comprueba si queda 1 o 0 tanques activos
+    private bool OneTankLeft()
+    {
+        int numTanksLeft = 0;
+        for (int i = 0; i < m_Tanks.Length; i++)
         {
-            // For all the tanks...
-            for (int i = 0; i < m_PlayerCount; i++)
+            if (m_Tanks[i] != null && m_Tanks[i].m_Instance != null && m_Tanks[i].m_Instance.activeSelf)
             {
-                var playerData = m_TankData[i];
-                
-                // ... create them, set their player number and references needed for control.
-                m_SpawnPoints[i].m_Instance =
-                    Instantiate(playerData.UsedPrefab, m_SpawnPoints[i].m_SpawnPoint.position, m_SpawnPoints[i].m_SpawnPoint.rotation) as GameObject;
-
-                //this guard against possible user error : if they created a prefab with Is Computer Control set to true
-                //then all of those prefab would be bots. So we ensure it's to false (the IsComputer from player data
-                //will re-enable this if needed when the game start)
-                var mov = m_SpawnPoints[i].m_Instance.GetComponent<TankMovement>();
-                mov.m_IsComputerControlled = false;
-                
-                m_SpawnPoints[i].m_PlayerNumber = i + 1;
-                m_SpawnPoints[i].ControlIndex = playerData.ControlIndex;
-                m_SpawnPoints[i].m_PlayerColor = playerData.TankColor;
-                m_SpawnPoints[i].m_ComputerControlled = playerData.IsComputer;
-            }
-
-            //we delayed setup after all tanks are created as they expect to have access to all other tanks in the manager
-            foreach (var tank in m_SpawnPoints)
-            {
-                if(tank.m_Instance == null)
-                    continue;
-                
-                tank.Setup(this);
-            }
-        }
-
-
-        private void SetCameraTargets()
-        {
-            // Create a collection of transforms the same size as the number of tanks.
-            Transform[] targets = new Transform[m_PlayerCount];
-
-            // For each of these transforms...
-            for (int i = 0; i < targets.Length; i++)
-            {
-                // ... set it to the appropriate tank transform.
-                targets[i] = m_SpawnPoints[i].m_Instance.transform;
-            }
-
-            // These are the targets the camera should follow.
-            m_CameraControl.m_Targets = targets;
-        }
-
-
-        // This is called from start and will run each phase of the game one after another.
-        private IEnumerator GameLoop ()
-        {
-            // Start off by running the 'RoundStarting' coroutine but don't return until it's finished.
-            yield return StartCoroutine (RoundStarting ());
-
-            // Once the 'RoundStarting' coroutine is finished, run the 'RoundPlaying' coroutine but don't return until it's finished.
-            yield return StartCoroutine (RoundPlaying());
-
-            // Once execution has returned here, run the 'RoundEnding' coroutine, again don't return until it's finished.
-            yield return StartCoroutine (RoundEnding());
-
-            // This code is not run until 'RoundEnding' has finished.  At which point, check if a game winner has been found.
-            if (m_GameWinner != null)
-            {
-                // If there is a game winner, restart the level.
-                SceneManager.LoadScene (0);
-            }
-            else
-            {
-                // If there isn't a winner yet, restart this coroutine so the loop continues.
-                // Note that this coroutine doesn't yield.  This means that the current version of the GameLoop will end.
-                StartCoroutine (GameLoop ());
-            }
-        }
-
-
-        private IEnumerator RoundStarting ()
-        {
-            // As soon as the round starts reset the tanks and make sure they can't move.
-            ResetAllTanks ();
-            DisableTankControl ();
-
-            // Snap the camera's zoom and position to something appropriate for the reset tanks.
-            m_CameraControl.SetStartPositionAndSize ();
-
-            // Increment the round number and display text showing the players what round it is.
-            m_RoundNumber++;
-            m_TitleText.text = "ROUND " + m_RoundNumber;
-
-            // Wait for the specified length of time until yielding control back to the game loop.
-            yield return m_StartWait;
-        }
-
-
-        private IEnumerator RoundPlaying ()
-        {
-            // As soon as the round begins playing let the players control the tanks.
-            EnableTankControl ();
-
-            // Clear the text from the screen.
-            m_TitleText.text = string.Empty;
-
-            // While there is not one tank left...
-            while (!OneTankLeft())
-            {
-                // ... return on the next frame.
-                yield return null;
+                numTanksLeft++;
             }
         }
+        return numTanksLeft <= 1;
+    }
 
-
-        private IEnumerator RoundEnding ()
+    // Devuelve el TankManager del único tanque activo (o null si hay empate/error)
+    private TankManager GetRoundWinner()
+    {
+        for (int i = 0; i < m_Tanks.Length; i++)
         {
-            // Stop tanks from moving.
-            DisableTankControl ();
-
-            // Clear the winner from the previous round.
-            m_RoundWinner = null;
-
-            // See if there is a winner now the round is over.
-            m_RoundWinner = GetRoundWinner ();
-
-            // If there is a winner, increment their score.
-            if (m_RoundWinner != null)
-                m_RoundWinner.m_Wins++;
-
-            // Now the winner's score has been incremented, see if someone has one the game.
-            m_GameWinner = GetGameWinner ();
-
-            // Get a message based on the scores and whether or not there is a game winner and display it.
-            string message = EndMessage ();
-            m_TitleText.text = message;
-
-            // Wait for the specified length of time until yielding control back to the game loop.
-            yield return m_EndWait;
-        }
-
-
-        // This is used to check if there is one or fewer tanks remaining and thus the round should end.
-        private bool OneTankLeft()
-        {
-            // Start the count of tanks left at zero.
-            int numTanksLeft = 0;
-
-            // Go through all the tanks...
-            for (int i = 0; i < m_PlayerCount; i++)
+            if (m_Tanks[i] != null && m_Tanks[i].m_Instance != null && m_Tanks[i].m_Instance.activeSelf)
             {
-                // ... and if they are active, increment the counter.
-                if (m_SpawnPoints[i].m_Instance.activeSelf)
-                    numTanksLeft++;
+                return m_Tanks[i];
             }
-
-            // If there are one or fewer tanks remaining return true, otherwise return false.
-            return numTanksLeft <= 1;
         }
-        
-        
-        // This function is to find out if there is a winner of the round.
-        // This function is called with the assumption that 1 or fewer tanks are currently active.
-        private TankManager GetRoundWinner()
+        return null; // Empate o error
+    }
+
+    // Devuelve el TankManager que ha ganado el juego (o null si nadie ha ganado)
+    private TankManager GetGameWinner()
+    {
+        for (int i = 0; i < m_Tanks.Length; i++)
         {
-            // Go through all the tanks...
-            for (int i = 0; i < m_PlayerCount; i++)
+            if (m_Tanks[i] != null && m_Tanks[i].m_Wins == m_NumRoundsToWin)
             {
-                // ... and if one of them is active, it is the winner so return it.
-                if (m_SpawnPoints[i].m_Instance.activeSelf)
-                    return m_SpawnPoints[i];
+                return m_Tanks[i];
             }
-
-            // If none of the tanks are active it is a draw so return null.
-            return null;
         }
+        return null;
+    }
 
+    // Genera el mensaje de fin de ronda/juego
+    private string EndMessage()
+    {
+        string message = "EMPATE!"; // Mensaje por defecto
 
-        // This function is to find out if there is a winner of the game.
-        private TankManager GetGameWinner()
+        if (m_RoundWinner != null)
+            message = m_RoundWinner.m_ColoredPlayerText + " GANA LA RONDA!";
+
+        message += "\n\n\n";
+
+        for (int i = 0; i < m_Tanks.Length; i++)
         {
-            // Go through all the tanks...
-            for (int i = 0; i < m_PlayerCount; i++)
+            // Añade la puntuación solo si el TankManager existe
+            if (m_Tanks[i] != null)
             {
-                // ... and if one of them has enough rounds to win the game, return it.
-                if (m_SpawnPoints[i].m_Wins == m_NumRoundsToWin)
-                    return m_SpawnPoints[i];
-            }
-
-            // If no tanks have enough rounds to win, return null.
-            return null;
-        }
-
-
-        // Returns a string message to display at the end of each round.
-        private string EndMessage()
-        {
-            // By default when a round ends there are no winners so the default end message is a draw.
-            string message = "DRAW!";
-
-            // If there is a winner then change the message to reflect that.
-            if (m_RoundWinner != null)
-                message = m_RoundWinner.m_ColoredPlayerText + " WINS THE ROUND!";
-
-            // Add some line breaks after the initial message.
-            message += "\n\n\n\n";
-
-            // Go through all the tanks and add each of their scores to the message.
-            for (int i = 0; i < m_PlayerCount; i++)
-            {
-                message += m_SpawnPoints[i].m_ColoredPlayerText + ": " + m_SpawnPoints[i].m_Wins + " WINS\n";
-            }
-
-            // If there is a game winner, change the entire message to reflect that.
-            if (m_GameWinner != null)
-                message = m_GameWinner.m_ColoredPlayerText + " WINS THE GAME!";
-
-            return message;
-        }
-
-
-        // This function is used to turn all the tanks back on and reset their positions and properties.
-        private void ResetAllTanks()
-        {
-            for (int i = 0; i < m_PlayerCount; i++)
-            {
-                m_SpawnPoints[i].Reset();
+                // Usa ?? "PLAYER X" por si m_ColoredPlayerText es nulo
+                message += (m_Tanks[i].m_ColoredPlayerText ?? $"PLAYER {i + 1}") + ": " + m_Tanks[i].m_Wins + " VICTORIAS\n";
             }
         }
 
+        if (m_GameWinner != null)
+            message = (m_GameWinner.m_ColoredPlayerText ?? $"PLAYER {m_GameWinner.m_PlayerNumber}") + " GANA EL JUEGO!";
 
-        private void EnableTankControl()
+        return message;
+    }
+
+    // Llama a Reset() en cada TankManager
+    private void ResetAllTanks()
+    {
+        for (int i = 0; i < m_Tanks.Length; i++)
         {
-            for (int i = 0; i < m_PlayerCount; i++)
+            if (m_Tanks[i] != null && m_Tanks[i].m_Instance != null)
             {
-                m_SpawnPoints[i].EnableControl();
+                m_Tanks[i].Reset();
             }
         }
+    }
 
-
-        private void DisableTankControl()
+    // Llama a EnableControl() en cada TankManager
+    private void EnableTankControl()
+    {
+        for (int i = 0; i < m_Tanks.Length; i++)
         {
-            for (int i = 0; i < m_PlayerCount; i++)
+            if (m_Tanks[i] != null && m_Tanks[i].m_Instance != null)
             {
-                m_SpawnPoints[i].DisableControl();
+                m_Tanks[i].EnableControl();
+            }
+        }
+    }
+
+    // Llama a DisableControl() en cada TankManager
+    private void DisableTankControl()
+    {
+        for (int i = 0; i < m_Tanks.Length; i++)
+        {
+            if (m_Tanks[i] != null && m_Tanks[i].m_Instance != null)
+            {
+                m_Tanks[i].DisableControl();
             }
         }
     }

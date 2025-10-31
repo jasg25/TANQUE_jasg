@@ -1,95 +1,104 @@
 using UnityEngine;
 
-namespace Tanks.Complete
+// Adaptado para Unity 6
+public class ShellExplosion : MonoBehaviour
 {
-    public class ShellExplosion : MonoBehaviour
+    public LayerMask m_TankMask; // Define qué capas son consideradas "tanques"
+    public ParticleSystem m_ExplosionParticles; // Referencia al sistema de partículas HIJO de este objeto
+    public AudioSource m_ExplosionAudio; // Referencia al AudioSource HIJO de este objeto
+    public float m_MaxDamage = 100f; // Daño máximo en el epicentro
+    public float m_ExplosionForce = 1000f; // Fuerza de la explosión aplicada a los tanques
+    public float m_MaxLifeTime = 2f; // Tiempo en segundos antes de que el proyectil se autodestruya si no choca
+    public float m_ExplosionRadius = 5f; // Radio de la explosión
+
+    private bool m_Exploded = false; // Para asegurar que explote solo una vez
+
+    private void Start()
     {
-        public LayerMask m_TankMask;                        // Used to filter what the explosion affects, this should be set to "Players".
-        public ParticleSystem m_ExplosionParticles;         // Reference to the particles that will play on explosion.
-        public AudioSource m_ExplosionAudio;                // Reference to the audio that will play on explosion.
-        [HideInInspector] public float m_MaxLifeTime = 2f;  // The time in seconds before the shell is removed.
+        // Destruye el proyectil después de m_MaxLifeTime si aún existe
+        Destroy(gameObject, m_MaxLifeTime);
 
-        // All those are hidden in inspector as they will actually come from the TankShooting scripts
-        [HideInInspector] public float m_MaxDamage = 100f;                    // The amount of damage done if the explosion is centred on a tank.
-        [HideInInspector] public float m_ExplosionForce = 50f;                // The amount of force added to a tank at the centre of the explosion.
-        [HideInInspector] public float m_ExplosionRadius = 5f;                // The maximum distance away from the explosion tanks can be and are still affected.
+        // Comprobaciones iniciales
+        if (m_ExplosionParticles == null) Debug.LogError("ShellExplosion: Falta asignar 'Explosion Particles' en el prefab Shell.");
+        if (m_ExplosionAudio == null) Debug.LogWarning("ShellExplosion: Falta asignar 'Explosion Audio' en el prefab Shell. No habrá sonido de explosión.");
 
+    }
 
-        private void Start ()
+    // Se llama cuando otro Collider entra en el Trigger de este proyectil
+    private void OnTriggerEnter(Collider other)
+    {
+        // Si ya explotó, no hace nada más
+        if (m_Exploded) return;
+
+        // Busca todos los colliders dentro del radio de explosión que estén en la capa m_TankMask
+        Collider[] colliders = Physics.OverlapSphere(transform.position, m_ExplosionRadius, m_TankMask);
+
+        // Itera sobre todos los colliders encontrados
+        for (int i = 0; i < colliders.Length; i++)
         {
-            // If it isn't destroyed by then, destroy the shell after its lifetime.
-            Destroy (gameObject, m_MaxLifeTime);
+            Rigidbody targetRigidbody = colliders[i].GetComponent<Rigidbody>();
+            // Si el objeto no tiene Rigidbody, pasa al siguiente
+            if (!targetRigidbody) continue;
+
+            // Añade la fuerza de la explosión al Rigidbody del tanque
+            targetRigidbody.AddExplosionForce(m_ExplosionForce, transform.position, m_ExplosionRadius);
+
+            TankHealth targetHealth = targetRigidbody.GetComponent<TankHealth>();
+            // Si el objeto no tiene el script TankHealth, pasa al siguiente
+            if (!targetHealth) continue;
+
+            // Calcula el daño basado en la distancia
+            float damage = CalculateDamage(targetRigidbody.position);
+            // Aplica el daño al tanque
+            targetHealth.TakeDamage(damage);
         }
 
+        // --- Efectos de Explosión ---
 
-        private void OnTriggerEnter (Collider other)
+        // Desvincula las partículas del proyectil para que no se destruyan con él
+        if (m_ExplosionParticles != null)
         {
-			// Collect all the colliders in a sphere from the shell's current position to a radius of the explosion radius.
-            Collider[] colliders = Physics.OverlapSphere (transform.position, m_ExplosionRadius, m_TankMask);
-
-            // Go through all the colliders...
-            for (int i = 0; i < colliders.Length; i++)
-            {
-                // ... and find their rigidbody.
-                Rigidbody targetRigidbody = colliders[i].GetComponent<Rigidbody> ();
-
-                // If they don't have a rigidbody, go on to the next collider.
-                if (!targetRigidbody)
-                    continue;
-
-                // Add an explosion force.
-                targetRigidbody.GetComponent<TankMovement>().AddExplosionForce(m_ExplosionForce, transform.position, m_ExplosionRadius);
-
-                // Find the TankHealth script associated with the rigidbody.
-                TankHealth targetHealth = targetRigidbody.GetComponent<TankHealth> ();
-
-                // If there is no TankHealth script attached to the gameobject, go on to the next collider.
-                if (!targetHealth)
-                    continue;
-
-                // Calculate the amount of damage the target should take based on it's distance from the shell.
-                float damage = CalculateDamage (targetRigidbody.position);
-
-                // Deal this damage to the tank.
-                targetHealth.TakeDamage (damage);
-            }
-
-            // Unparent the particles from the shell.
             m_ExplosionParticles.transform.parent = null;
-
-            // Play the particle system.
-            m_ExplosionParticles.Play();
-
-            // Play the explosion sound effect.
-            m_ExplosionAudio.Play();
-
-            // Once the particles have finished, destroy the gameobject they are on.
-            ParticleSystem.MainModule mainModule = m_ExplosionParticles.main;
-            Destroy (m_ExplosionParticles.gameObject, mainModule.duration);
-
-            // Destroy the shell.
-            Destroy (gameObject);
+            m_ExplosionParticles.Play(); // Inicia las partículas
+                                         // Programa la destrucción del objeto de partículas después de que terminen
+                                         // Usa particleSystem.main.duration para obtener la duración
+            float duration = m_ExplosionParticles.main.duration + m_ExplosionParticles.main.startLifetime.constantMax; // Considera la duración y el tiempo de vida máximo
+            Destroy(m_ExplosionParticles.gameObject, duration);
         }
 
-
-        private float CalculateDamage (Vector3 targetPosition)
+        // Reproduce el sonido de explosión (si existe)
+        if (m_ExplosionAudio != null)
         {
-            // Create a vector from the shell to the target.
-            Vector3 explosionToTarget = targetPosition - transform.position;
-
-            // Calculate the distance from the shell to the target.
-            float explosionDistance = explosionToTarget.magnitude;
-
-            // Calculate the proportion of the maximum distance (the explosionRadius) the target is away.
-            float relativeDistance = (m_ExplosionRadius - explosionDistance) / m_ExplosionRadius;
-
-            // Calculate damage as this proportion of the maximum possible damage.
-            float damage = relativeDistance * m_MaxDamage;
-
-            // Make sure that the minimum damage is always 0.
-            damage = Mathf.Max (0f, damage);
-
-            return damage;
+            // Si el audio está en un objeto diferente al de partículas, también hay que desvincularlo
+            // Si está en el mismo objeto que las partículas, ya se desvinculó arriba.
+            // Asumimos que está en el mismo objeto que las partículas:
+            m_ExplosionAudio.Play();
         }
+
+        m_Exploded = true; // Marca como explotado
+
+        // Destruye el GameObject del proyectil inmediatamente
+        Destroy(gameObject);
+    }
+
+    // Calcula el daño basado en la distancia del objetivo a la explosión
+    private float CalculateDamage(Vector3 targetPosition)
+    {
+        Vector3 explosionToTarget = targetPosition - transform.position;
+        float explosionDistance = explosionToTarget.magnitude;
+
+        // Evita división por cero y daño si está fuera del radio
+        if (m_ExplosionRadius <= 0f || explosionDistance > m_ExplosionRadius) return 0f;
+
+        // Calcula qué tan cerca está el objetivo del epicentro (1 = epicentro, 0 = borde del radio)
+        float relativeDistance = (m_ExplosionRadius - explosionDistance) / m_ExplosionRadius;
+
+        // Calcula el daño basado en la cercanía y el daño máximo
+        float damage = relativeDistance * m_MaxDamage;
+
+        // Asegura que el daño no sea negativo
+        damage = Mathf.Max(0f, damage);
+
+        return damage;
     }
 }
